@@ -1,93 +1,174 @@
 import json
-from typing import Optional
+import os
 
-# 假设车品牌定义时预留了 500 个坑位
-CAR_BRAND_VOCAB_SIZE_LIMIT = 500 
+import numpy as np
+import torch
+from torch.utils.data import Dataset
 
-class BrandVocabManager:
-    def __init__(self, initial_brands_list=None):
-        # 定义特殊 Token
-        self.PAD_TOKEN = "<PAD>" # ID 0
-        self.UNK_TOKEN = "<UNK>" # ID 1 (遇到真·未知的兜底)
-        
-        # 内存中的映射表
-        self.token2id = {self.PAD_TOKEN: 0, self.UNK_TOKEN: 1}
-        self.id2token = {0: self.PAD_TOKEN, 1: self.UNK_TOKEN}
-        
-        # 记录当前用到了哪个ID
+
+# ==============================================================================
+# 特征处理流水线 (Feature Processing)
+# ==============================================================================
+class PersistentVocabMapper:
+    """
+    管理 ID 映射，并将字典持久化保存到 JSON 文件中
+    """
+
+    def __init__(self, feature_name, vocab_dir, max_size):
+        self.feature_name = feature_name
+        self.file_path = os.path.join(vocab_dir, f"{feature_name}.json")
+        self.max_size = max_size
+
+        # 初始化默认值
+        self.token2id = {"<PAD>": 0, "<UNK>": 1}
         self.next_id = 2
-        
-        # 如果有初始列表，直接构建
-        if initial_brands_list:
-            for brand in initial_brands_list:
-                self.add_brand(brand)
 
+        # 尝试从文件加载
+        self._load()
 
-    def add_brand(self, brand_name):
-        if brand_name not in self.token2id:
-            self.token2id[brand_name] = self.next_id
-            self.id2token[self.next_id] = brand_name
+    def _load(self):
+        """从 JSON 加载词表"""
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.token2id = data["token2id"]
+                    self.next_id = data["next_id"]
+                print(
+                    f"[{self.feature_name}] 已加载词表，当前大小: {len(self.token2id)}"
+                )
+            except Exception as e:
+                print(f"[{self.feature_name}] 加载失败，将使用新词表: {e}")
+
+    def _save(self):
+        """保存词表到 JSON"""
+        data = {"token2id": self.token2id, "next_id": self.next_id}
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        # print(f"[{self.feature_name}] 词表已保存 -> {self.file_path}")
+
+    def fit(self, values):
+        """训练时使用：扫描数据，更新词表，并保存"""
+        has_new = False
+        for v in set(values):
+            v_str = str(v)  # 强制转字符串，保证 JSON key 一致性
+            if v_str not in self.token2id:
+                if self.next_id < self.max_size:
+                    self.token2id[v_str] = self.next_id
+                    self.next_id += 1
+                    has_new = True
+
+        if has_new:
+            self._save()
+
+    def transform(self, value):
+        """推理时使用：支持动态新增"""
+        v_str = str(value)
+
+        # 1. 已存在
+        if v_str in self.token2id:
+            return self.token2id[v_str]
+
+        # 2. 新词，且有空位 -> 动态分配并立即保存
+        if self.next_id < self.max_size:
+            new_id = self.next_id
+            self.token2id[v_str] = new_id
             self.next_id += 1
-            return self.next_id
-        return self.token2id[brand_name]
 
-    def get_id(self, brand_name):
-        # 查不到就返回 UNK (1)
-        return self.token2id.get(brand_name, 1)
-    
-    def save_to_json(self,file_path:Optional[str]=None):
-        """保存到本地文件，用于版本控制或离线训练"""
-        if not file_path:
-            print("请输入需要保存的文件路径 ")
-            return 
+            # 立即保存，保证下一次请求或其他进程能看到（简单的模拟）
+            self._save()
+            return new_id
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump({
-                "token2id": self.token2id,
-                "next_id": self.next_id
-            }, f, ensure_ascii=False, indent=2)
+        # 3. 没空位 -> UNK
+        else:
+            return self.token2id["<UNK>"]
 
-    def load_from_json(self,file_path:Optional[str]=None):
+class FeatureProcessor:
+    def __init__(self, config):
+        self.config = config
+        self.mappers = {}
+        # 初始化每个稀疏特征的 Mapper
+        for feat, limit in config["vocab_limits"].items():
+            self.mappers[feat] = PersistentVocabMapper(
+                feature_name=feat, vocab_dir=config["vocab_dir"], max_size=limit
+            )
 
-        if not file_path:
-            print("请输入需要打开的文件路径 ")
-            return 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            self.token2id = data["token2id"]
-            # 反转生成 id2token
-            self.id2token = {v: k for k, v in self.token2id.items()}
-            self.next_id = data["next_id"]
+    def fit(self, df):
+        """扫描训练数据，建立词表"""
+        for feat in self.config["sparse_features"]:
+            self.mappers[feat].fit(df[feat].values)
 
-    def sync_to_redis(self, redis_host='localhost', port=6379):
-        """同步到 Redis，供线上 Java/Go 服务直接读取"""
-        r = redis.Redis(host=redis_host, port=port, decode_responses=True)
-        # 使用 Hash 结构存储
-        r.hmset("feature:brand:map", self.token2id)
-        r.set("feature:brand:next_id", self.next_id)
+    def get_bge_embedding(self, text_list):
+        """
+        [模拟] 调用 BGE 模型。
+        在真实场景下，这里加载 HuggingFace 的模型进行推理。
+        这里用随机向量代替，为了让你能跑通代码。
+        """
+        batch_size = len(text_list)
+        # 模拟 BGE 输出 64维向量
+        return torch.randn(batch_size, self.config["text_feature_dim"])
+
+    def transform(self, df):
+        """将 DataFrame 转化为 Tensor 字典"""
+        # 1. 处理 Sparse (Categorical)
+        sparse_dict = {}
+        for feat in self.config["sparse_features"]:
+            # map操作
+            ids = [self.mappers[feat].transform(v) for v in df[feat].values]
+            sparse_dict[feat] = torch.tensor(ids, dtype=torch.long)
+
+        # 2. 处理 Dense (Numerical) -> 简单归一化
+        dense_list = []
+        for feat in self.config["dense_features"]:
+            vals = df[feat].values.astype(np.float32)
+            # 简单的 MaxMin 归一化模拟
+            if feat == "distance_km":
+                vals = vals / 50.0
+            if feat == "rating":
+                vals = vals / 5.0
+            dense_list.append(vals.reshape(-1, 1))
+        dense_tensor = torch.tensor(
+            np.concatenate(dense_list, axis=1), dtype=torch.float32
+        )
+
+        # 3. 处理 Text (BGE)
+        text_tensor = self.get_bge_embedding(df["text_raw"].tolist())
+
+        # 4. Label
+        label_tensor = None
+        if "label" in df.columns:
+            label_tensor = torch.tensor(df["label"].values, dtype=torch.float32).view(
+                -1, 1
+            )
+
+        return sparse_dict, dense_tensor, text_tensor, label_tensor
 
 
 
-def handle_new_brand_request(manager, new_brand_name):
-    """
-    处理线上新出现的品牌
-    """
-    # 1. 检查是否已存在
-    if new_brand_name in manager.token2id:
-        return manager.get_id(new_brand_name)
-    
-    # 2. 检查是否有空余坑位
-    if manager.next_id >= CAR_BRAND_VOCAB_SIZE_LIMIT:
-        print(f"[警告] 词表已满 ({manager.next_id})！新品牌 {new_brand_name} 暂时映射为 UNK，请安排模型扩容重训。")
-        return 1 # 返回 UNK
-    
-    # 3. 分配新ID并保存
-    new_id = manager.add_brand(new_brand_name)
-    manager.save_to_json() # 立即持久化
-    # manager.sync_to_redis() # 同步线上
-    
-    print(f"[成功] 新品牌 '{new_brand_name}' 已入库，分配 ID: {new_id}。模型 Embedding 第 {new_id} 行参数目前是随机初始化的。")
-    return new_id
 
+# ==============================================================================
+# 封装 Dataset
+# ==============================================================================
+class RepairDataset(Dataset):
+    def __init__(self, sparse_dict, dense_tensor, text_tensor, label_tensor=None):
+        self.sparse_dict = sparse_dict
+        self.dense_tensor = dense_tensor
+        self.text_tensor = text_tensor
+        self.label_tensor = label_tensor
+        self.length = len(dense_tensor)
+        # 获取 keys 列表以保证顺序
+        self.sparse_keys = list(sparse_dict.keys())
 
+    def __len__(self):
+        return self.length
 
+    def __getitem__(self, idx):
+        # 构造单个样本的 sparse 字典
+        s_data = {k: self.sparse_dict[k][idx] for k in self.sparse_keys}
+        d_data = self.dense_tensor[idx]
+        t_data = self.text_tensor[idx]
+
+        if self.label_tensor is not None:
+            l_data = self.label_tensor[idx]
+            return s_data, d_data, t_data, l_data
+        return s_data, d_data, t_data

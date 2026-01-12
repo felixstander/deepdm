@@ -3,7 +3,6 @@ import json
 import os
 from datetime import timedelta
 
-import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -264,3 +263,19 @@ class DailyIncrementalPipeline:
             final_train_df.to_csv(self.buffer_file, index=False)
             print(f"    [Buffer] 训练数据已保存至积压区: {self.buffer_file}")
             print(f"             当前积压池大小: {len(final_train_df)} 条，等待明日合并训练。")
+
+if __name__ == "__main__":
+    # 假设你已经有了 CONFIG 和 generate_fake_data 函数 (来自上一段代码)
+    # 此处省略 CONFIG 定义，直接使用上一段的 CONFIG
+    
+    # 1. 模拟第一天 (冷启动)
+    pipeline = DailyIncrementalPipeline(CONFIG)
+    
+    # 模拟生成 "2024-01-01" 的数据
+    df_day1 = generate_fake_data(num_samples=1000) 
+    pipeline.run_daily_job("2024-01-01", df_day1)
+    
+    # 2. 模拟第二天 (增量更新)
+    # 模拟生成 "2024-01-02" 的数据，包含一些新模式
+    df_day2 = generate_fake_data(num_samples=1000)
+    pipeline.run_daily_job("2024-01-02", df_day2)
