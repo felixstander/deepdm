@@ -1,8 +1,8 @@
 {
   "active_model_path": "./model_history/model_2026-01-13.pth",
-  "updated_at": "2026-01-13 01:10:38.930977",
+  "updated_at": "2026-01-13 01:16:06.771288",
   "metrics": {
     "auc": "",
-    "loss": 0.3753975310444832
+    "loss": 0.42511436881423
   }
 }

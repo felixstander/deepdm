@@ -14,8 +14,8 @@ CONFIG = {
     "buffer_dir":"./data/buffer",# 存放效果不好时的积压数据
     "sparse_features": ["brand_name", "shop_id", "city_id"],
     "dense_features": ["distance_km", "price_score", "rating"],
-    "text_feature_dim": 64,
+    "text_feature_dim": 768,
     # 预留 Buffer 配置
     "vocab_limits": {"brand_name": 500, "shop_id": 1000, "city_id": 50},
-    "embed_dim": 64,
+    "embed_dim": 128,
 }
